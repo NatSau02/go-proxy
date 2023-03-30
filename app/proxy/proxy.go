@@ -1,134 +1,90 @@
 package proxy
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"log"
-	"net"
 	"net/http"
-	"net/http/httputil"
 	"strings"
-	"time"
-)
 
-var hopHeaders = []string{
-	"Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te", // canonicalized version of "TE"
-	"Trailers",
-	"Transfer-Encoding",
-	"Upgrade",
-}
+	"github.com/sirupsen/logrus"
+)
 
 type ServerProxy struct {
 	Host  string
-	Cache map[string]CacheData
+	Cache *CacheResponse
 }
 
-type CacheData struct {
-	time int64
-	body []byte
-}
-
-func NewServerProxy() *ServerProxy {
+func NewServerProxy(cache *CacheResponse) *ServerProxy {
 	return &ServerProxy{
-		Cache: make(map[string]CacheData),
+		Cache: cache,
 	}
 }
 
-var validHosts = []string{
-	".com",
-	".org",
-	".edu",
-	".net",
-	".fn",
-	".info",
-	".biz",
-	".ru",
-}
+func (self *ServerProxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
 
-func (s *ServerProxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
-	url := s.makeURL(req)
-	if data, exist := s.Cache[url]; exist {
-		if time.Since(time.Unix(data.time, 0)).Minutes() < 10 {
-			fmt.Println("Нашел в кэше!!!")
-			respCache := bufio.NewReader(bytes.NewReader(data.body))
-			resp, err := http.ReadResponse(respCache, nil)
-			log.Println(url, " ", resp.Status)
-			if err != nil {
-				log.Fatal(err)
-			}
-			io.Copy(wr, resp.Body)
+	url := self.makeURL(req)
+
+	resp, existCache, err := self.Cache.Find(url)
+	if err != nil {
+		logrus.Errorf("server proxy: serve http: %s", err.Error())
+	}
+
+	if !existCache {
+		resp, err = doRequest(url, req)
+		if err != nil {
+			http.Error(wr, "Server Error", http.StatusInternalServerError)
+			logrus.Errorf("server proxy: serve http: %s", err.Error())
 			return
 		}
-
+		if err := self.Cache.Save(url, resp); err != nil {
+			logrus.Errorf("server proxy: serve http: %s", err.Error())
+		}
 	}
 
-	var err error
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			logrus.Errorf("server proxy: serve http: body close: %s", err.Error())
+		}
+	}()
+
+	logrus.Info(url, " ", resp.Status)
+
+	copyHeader(wr.Header(), resp.Header)
+	wr.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(wr, resp.Body); err != nil {
+		logrus.Errorf("server proxy: serve http: io.copy: %s", err.Error())
+	}
+}
+
+func doRequest(url string, req *http.Request) (*http.Response, error) {
 	client := &http.Client{}
-
-	req, err = http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(context.Background(),
+		http.MethodGet, url, nil)
 	if err != nil {
-		return
-	}
-
-	delHopHeaders(req.Header)
-
-	if clientIP, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
-		appendHostToXForwardHeader(req.Header, clientIP)
+		return nil, fmt.Errorf(
+			"do request: new request with context: %s", err.Error())
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		http.Error(wr, "Server Error", http.StatusInternalServerError)
-		log.Fatal("ServeHTTP:", err)
-	}
-	defer resp.Body.Close()
-
-	log.Println(req.URL.String(), " ", resp.Status)
-
-	cache, err := httputil.DumpResponse(resp, true)
-	if err != nil {
-
-	}
-	s.Cache[req.URL.String()] = CacheData{
-		time: time.Now().Unix(),
-		body: cache,
+		return nil, fmt.Errorf("do request: %s", err)
 	}
 
-	delHopHeaders(resp.Header)
-
-	copyHeader(wr.Header(), resp.Header)
-	wr.WriteHeader(resp.StatusCode)
-	io.Copy(wr, resp.Body)
+	return resp, nil
 }
 
-func (s *ServerProxy) makeURL(req *http.Request) string {
+func (self *ServerProxy) makeURL(req *http.Request) string {
 	url := req.RequestURI
 	if len(url) > 0 {
 		url = url[1:]
 	}
 	host, path, _ := strings.Cut(url, "/")
-	if isValidHost(host) {
-		s.Host = host
-		return fmt.Sprintf("https://%s/%s", s.Host, path)
+	if hostsArray.isValid(host) {
+		self.Host = host
+		return fmt.Sprintf("https://%s/%s", self.Host, path)
 	}
-	return fmt.Sprintf("https://%s/%s", s.Host, url)
-}
-
-func isValidHost(host string) bool {
-	for _, suff := range validHosts {
-		if strings.HasSuffix(host, suff) {
-			return true
-		}
-
-	}
-	return false
+	return fmt.Sprintf("https://%s/%s", self.Host, url)
 }
 
 func copyHeader(dst, src http.Header) {
@@ -137,17 +93,4 @@ func copyHeader(dst, src http.Header) {
 			dst.Add(k, v)
 		}
 	}
-}
-
-func delHopHeaders(header http.Header) {
-	for _, h := range hopHeaders {
-		header.Del(h)
-	}
-}
-
-func appendHostToXForwardHeader(header http.Header, host string) {
-	if prior, ok := header["X-Forwarded-For"]; ok {
-		host = strings.Join(prior, ", ") + ", " + host
-	}
-	header.Set("X-Forwarded-For", host)
 }
