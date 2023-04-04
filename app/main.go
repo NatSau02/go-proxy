@@ -33,6 +33,13 @@ func main() {
 
 	logrus.Print("start proxy server")
 
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			cache.Update()
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	<-quit
