@@ -15,12 +15,18 @@ import (
 func main() {
 
 	cache := proxy.NewCacheResponse()
-	server := proxy.NewServerProxy(cache)
-	http.HandleFunc("/", server.ServeHTTP)
+	newProxy := proxy.NewServerProxy(cache)
+	reverseProxy, err := newProxy.ConfigureProxy("")
+	if err != nil {
+		panic(err)
+	}
+
+	// handle all requests to your server using the proxy
+	http.HandleFunc("/", newProxy.ProxyRequestHandler(reverseProxy))
 
 	srv := &http.Server{
-		Handler:      server,
-		Addr:         "127.0.0.1:8000",
+		Handler:      reverseProxy,
+		Addr:         "127.0.0.1:8088",
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
 	}
@@ -31,7 +37,7 @@ func main() {
 		}
 	}()
 
-	logrus.Print("start proxy server")
+	logrus.Print("proxy server started")
 
 	go func() {
 		for {

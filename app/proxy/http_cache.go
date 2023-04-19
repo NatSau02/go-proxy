@@ -22,6 +22,17 @@ func NewCacheResponse() *ResponseCache {
 		cache: make(map[KeyRequest]ResponseInfo)}
 }
 
+type KeyRequest struct {
+	URL    string
+	Method string
+	Body   string
+}
+
+type ResponseInfo struct {
+	Time int64
+	Body []byte
+}
+
 func (self *ResponseCache) Save(key KeyRequest, resp *http.Response) error {
 	body, err := httputil.DumpResponse(resp, true)
 	if err != nil {
@@ -60,15 +71,4 @@ func (self *ResponseCache) Update() {
 			delete(self.cache, key)
 		}
 	}
-}
-
-type KeyRequest struct {
-	URL    string
-	Method string
-	Body   string
-}
-
-type ResponseInfo struct {
-	Time int64
-	Body []byte
 }
